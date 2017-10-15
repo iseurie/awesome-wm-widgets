@@ -2,28 +2,26 @@ local awful = require("awful")
 local beautiful = require("beautiful")
 local naughty = require("naughty")
 local wibox = require("wibox")
-local watch = require("awful.widget.watch")
+local timer = require("gears.timer")
 
 local HOME = os.getenv("HOME")
 
--- only text
-local text = wibox.widget {
-    id = "txt",
-    font = "Play 5",
-    widget = wibox.widget.textbox
+local PWR_DIR = "/sys/class/power_supply/"
+
+local textbox = wibox.widget {
+	id = "txt",
+	font = "Play 5",
+	widget = wibox.widget.textbox
 }
 
--- mirror the text, because the whole widget will be mirrored after
-local mirrored_text = wibox.container.mirror(text, { horizontal = true })
+local textbox_mirrored = wibox.container.mirror(textbox)
+local textbox_mirrored_wbg = wibox.container.background(textbox_mirrored)
 
--- mirrored text with background
-local mirrored_text_with_background = wibox.container.background(mirrored_text)
-
-local batteryarc = wibox.widget {
-    mirrored_text_with_background,
+local batteryarc = wibox.container.mirror(wibox.widget {
+	textbox_mirrored_wbg,
     max_value = 1,
     rounded_edge = true,
-    thickness = 2,
+    thickness = 1.5,
     start_angle = 4.71238898, -- 2pi*3/4
     forced_height = 17,
     forced_width = 17,
@@ -33,38 +31,72 @@ local batteryarc = wibox.widget {
     set_value = function(self, value)
         self.value = value
     end,
-}
 
--- mirror the widget, so that chart value increases clockwise
-batteryarc_widget = wibox.container.mirror(batteryarc, { horizontal = true })
+	battery_state = {
+		index = 0,
+		status = "",
+		charge = 0,
+	},
 
-watch("acpi", 10,
-    function(widget, stdout, stderr, exitreason, exitcode)
-        local batteryType
-        local _, status, charge_str, time = string.match(stdout, '(.+): (%a+), (%d?%d%d)%%,? ?.*')
-        local charge = tonumber(charge_str)
-        widget.value = charge / 100
-        if status == 'Charging' then
-            mirrored_text_with_background.bg = beautiful.widget_green
-            mirrored_text_with_background.fg = beautiful.widget_black
-        else
-            mirrored_text_with_background.bg = beautiful.widget_transparent
-            mirrored_text_with_background.fg = beautiful.widget_main_color
-        end
+	init = function (self, index)
+		self.update_bat_state(index)
+	end,
 
-        if charge < 15 then
-            batteryarc.colors = { beautiful.widget_red }
-            if status ~= 'Charging' then
+	read_bat_prop = function(self, prop)
+		local index = self.battery_state.index
+		local bat_path = PWR_DIR.."BAT"..index
+		local f, err = io.open(bat_path.."/"..prop, "r")
+		if err then
+			naughty.notify({ preset = naughty.config.presets.critical,
+							 title = "Cannot read battery "..index.." "..prop,
+							 text = "error: "..err })
+			return nil
+		end
+		ret = f:read("*all")
+		f:close()
+		return ret
+	end,
+
+	update_bat_state = function(self)
+		local charge_now = tonumber(self.read_bat_prop(self, "charge_now")) or 0
+		local charge_full = tonumber(self.read_bat_prop(self, "charge_full")) or 0
+		self.battery_state.status = self.read_bat_prop(self, "status") or "..."
+		self.battery_state.charge = charge_now / charge_full * 100
+		self.repaint(self)
+	end,
+
+	repaint = function(self)
+		self.set_value(self, self.battery_state.charge / 100)
+		textbox.text = self.battery_state.charge
+		if status == 'Charging' then
+			textbox_mirrored_wbg.bg = beautiful.widget_green
+			textbox_mirrored_wbg.fg = beautiful.widget_black
+		else
+			textbox_mirrored_wbg.bg = beautiful.widget_transparent
+			textbox_mirrored_wbg.fg = beautiful.widget_main_color
+		end
+
+		if self.battery_state.charge <= 15 then
+            self.colors = { beautiful.widget_red }
+            if self.battery_state.status ~= 'Charging' then
                 show_battery_warning()
             end
-        elseif charge > 15 and charge < 40 then
-            batteryarc.colors = { beautiful.widget_yellow }
+        elseif self.battery_state.charge > 15 and self.battery_state.charge < 40 then
+            self.colors = { beautiful.widget_yellow }
         else
-            batteryarc.colors = { beautiful.widget_main_color }
+            self.colors = { beautiful.widget_main_color }
         end
-        text.text = charge
-    end,
-    batteryarc)
+	end
+}, { horizontal = true }).widget
+
+-- mirror the widget, so that chart value increases clockwise
+batteryarc_widget = batteryarc
+
+timer {
+	timeout = 5,
+	autostart = true,
+	callback = batteryarc.update_bat_state(batteryarc)
+}
 
 -- Popup with battery info
 -- One way of creating a pop-up notification - naughty.notify
@@ -99,7 +131,7 @@ function show_battery_warning()
     naughty.notify {
         icon = HOME .. "/.config/awesome/nichosi.png",
         icon_size = 100,
-        text = "Huston, we have a problem",
+        text = "Houston, we have a problem",
         title = "Battery is dying",
         timeout = 5,
         hover_timeout = 0.5,
